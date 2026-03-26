@@ -324,8 +324,9 @@ def _run_remote(base_url: str, task_id: str, commands: List[str],
 # ──────────────────────────── Printer ────────────────────────────
 
 def _print_result(r: Dict[str, Any]) -> None:
-    bar = "█" * int(r["score"] * 20) + "░" * (20 - int(r["score"] * 20))
-    status = "✅ PASS" if r["passed"] else "❌ FAIL"
+    filled = int(r["score"] * 20)
+    bar = "#" * filled + "-" * (20 - filled)
+    status = "PASS" if r["passed"] else "FAIL"
     print(f"\n  Task  : {r['task_id']}")
     print(f"  Agent : {r['agent']}")
     print(f"  Score : {r['score']:.4f}  [{bar}]  {status}")
@@ -394,7 +395,7 @@ def main() -> None:
     out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "baseline_results.json")
     with open(out_path, "w") as fh:
         json.dump(all_results, fh, indent=2)
-    print(f"\n  Results saved → {out_path}")
+    print(f"\n  Results saved -> {out_path}")
     print()
 
 

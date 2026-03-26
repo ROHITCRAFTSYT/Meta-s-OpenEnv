@@ -5,6 +5,8 @@ Tasks:
     task1_discovery   — easy   — identify all failing/degraded services
     task2_rca         — medium — root-cause analysis of the password rotation
     task3_remediation — hard   — full remediation (fix configs + restart services)
+    task4_disk_full   — medium — diagnose and fix disk-full incident
+    task5_ssl_expired — hard   — diagnose and fix expired SSL certificate
 """
 from __future__ import annotations
 
@@ -281,6 +283,125 @@ def grade_task3(env: "DevOpsEnv") -> GraderResult:
     )
 
 
+# ─────────────────────────── Task 4: Disk Full ───────────────────────────
+
+
+def grade_task4(env: "DevOpsEnv") -> GraderResult:
+    """
+    Score based on 5 criteria (each 0.20):
+        1. Identified disk full root cause (read df or error logs)
+        2. Found large log files (du / find / ls on /var/log)
+        3. Freed disk space (truncate or echo > on a log file)
+        4. Restarted at least 2 crashed services
+        5. All services running
+    """
+    from models import ServiceStatus
+
+    c1 = env._discovered_root_cause  # read df or disk-related logs
+    c2 = getattr(env, '_found_large_logs', False)
+    c3 = getattr(env, '_freed_disk_space', False)
+    c4 = len(env._services_restarted) >= 2
+    c5 = all(s.status == ServiceStatus.RUNNING for s in env._services.values())
+
+    criteria = [c1, c2, c3, c4, c5]
+    names = ["identified_disk_full", "found_large_logs",
+             "freed_disk_space", "restarted_services", "all_running"]
+    breakdown = {n: 0.20 if v else 0.0 for n, v in zip(names, criteria)}
+    score = round(sum(breakdown.values()), 4)
+    passed = score >= 0.7
+
+    hints = []
+    if not c1: hints.append("Run: df -h  or  cat /var/log/api-gateway/error.log")
+    if not c2: hints.append("Run: du -sh /var/log/*  or  ls -lh /var/log/api-gateway/")
+    if not c3: hints.append("Run: truncate -s 0 /var/log/api-gateway/access.log")
+    if not c4: hints.append("Run: systemctl restart api-gateway auth-service")
+    feedback = "Disk full incident resolved!" if score == 1.0 else ("Hints: " + " | ".join(hints) if hints else "Keep going!")
+
+    return GraderResult(task_id="task4_disk_full", score=score,
+                        breakdown=breakdown, passed=passed, feedback=feedback)
+
+
+# ─────────────────────────── Task 5: SSL Expired ───────────────────────────
+
+
+def grade_task5(env: "DevOpsEnv") -> GraderResult:
+    """
+    Score based on 5 criteria (each 0.20):
+        1. Found expired cert (cat /etc/ssl/certs/api-gateway.crt)
+        2. Found staging cert (cat /etc/ssl/staging/api-gateway.crt)
+        3. Deployed new cert (cp staging → certs)
+        4. Restarted api-gateway
+        5. All services running
+    """
+    from models import ServiceStatus
+
+    c1 = getattr(env, '_found_expired_cert', False)
+    c2 = getattr(env, '_found_new_cert', False)
+    c3 = getattr(env, '_deployed_new_cert', False)
+    c4 = "api-gateway" in env._services_restarted
+    c5 = all(s.status == ServiceStatus.RUNNING for s in env._services.values())
+
+    criteria = [c1, c2, c3, c4, c5]
+    names = ["found_expired_cert", "found_staging_cert",
+             "deployed_cert", "restarted_gateway", "all_running"]
+    breakdown = {n: 0.20 if v else 0.0 for n, v in zip(names, criteria)}
+    score = round(sum(breakdown.values()), 4)
+    passed = score >= 0.7
+
+    hints = []
+    if not c1: hints.append("cat /etc/ssl/certs/api-gateway.crt")
+    if not c2: hints.append("ls /etc/ssl/staging/ && cat /etc/ssl/staging/api-gateway.crt")
+    if not c3: hints.append("cp /etc/ssl/staging/api-gateway.crt /etc/ssl/certs/api-gateway.crt")
+    if not c4: hints.append("systemctl restart api-gateway")
+    feedback = "SSL cert deployed — cluster healthy!" if score == 1.0 else ("Hints: " + " | ".join(hints) if hints else "Keep going!")
+
+    return GraderResult(task_id="task5_ssl_expired", score=score,
+                        breakdown=breakdown, passed=passed, feedback=feedback)
+
+
+# ─────────────────────────── Task catalogue additions ───────────────────────────
+
+TASK_CATALOGUE["task4_disk_full"] = TaskInfo(
+    task_id="task4_disk_full",
+    name="Disk Full Incident",
+    description=(
+        "The /var/log partition is at 100% capacity. Services are crashing because "
+        "they cannot write to their log files. Find the large log files, free up "
+        "disk space by truncating them, then restart affected services."
+    ),
+    difficulty="medium",
+    max_steps=25,
+    objectives=[
+        "Run df -h to confirm disk is full",
+        "Find large log files with du or ls",
+        "Truncate or clear the large log files",
+        "Restart crashed services",
+        "All services back to RUNNING",
+    ],
+    action_schema=ACTION_SCHEMA,
+)
+
+TASK_CATALOGUE["task5_ssl_expired"] = TaskInfo(
+    task_id="task5_ssl_expired",
+    name="SSL Certificate Expired",
+    description=(
+        "The SSL certificate for api-gateway expired today, taking down all HTTPS "
+        "traffic. certbot auto-renewed the cert but only copied it to staging. "
+        "You must find the new cert, deploy it to production, then restart api-gateway."
+    ),
+    difficulty="hard",
+    max_steps=30,
+    objectives=[
+        "Read expired cert at /etc/ssl/certs/api-gateway.crt",
+        "Find renewed cert at /etc/ssl/staging/api-gateway.crt",
+        "Copy new cert: cp /etc/ssl/staging/api-gateway.crt /etc/ssl/certs/api-gateway.crt",
+        "Restart api-gateway",
+        "All services RUNNING",
+    ],
+    action_schema=ACTION_SCHEMA,
+)
+
+
 # ─────────────────────────── Dispatcher ───────────────────────────
 
 
@@ -290,6 +411,8 @@ def run_grader(env: "DevOpsEnv") -> GraderResult:
         "task1_discovery":   grade_task1,
         "task2_rca":         grade_task2,
         "task3_remediation": grade_task3,
+        "task4_disk_full":   grade_task4,
+        "task5_ssl_expired": grade_task5,
     }
     grader_fn = graders.get(env.task_id)
     if grader_fn is None:

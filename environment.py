@@ -355,6 +355,22 @@ TASKS: Dict[str, Dict[str, Any]] = {
             "All 5 services reporting RUNNING",
         ],
     },
+    "task4_disk_full": {
+        "name": "Disk Full Incident",
+        "description": "Free disk space and restore crashed services.",
+        "difficulty": "medium",
+        "max_steps": 25,
+        "objectives": ["Identify disk full", "Find large logs", "Free space", "Restart services"],
+        "scenario": "disk_full",
+    },
+    "task5_ssl_expired": {
+        "name": "SSL Certificate Expired",
+        "description": "Deploy renewed SSL cert and restore HTTPS traffic.",
+        "difficulty": "hard",
+        "max_steps": 30,
+        "objectives": ["Find expired cert", "Find new cert", "Deploy cert", "Restart gateway"],
+        "scenario": "ssl_expired",
+    },
 }
 
 
@@ -362,20 +378,23 @@ TASKS: Dict[str, Dict[str, Any]] = {
 
 REWARD = {
     # Discovery signals
-    "new_service_status_checked": 0.02,   # per unique service via systemctl/curl
-    "found_error_log":            0.03,   # per unique error log read
-    "found_postgres_rotation":    0.10,   # reading postgres log that shows rotation
-    "found_new_password":         0.05,   # reading /etc/secrets/db_credentials
-    "found_old_password_in_cfg":  0.03,   # noticing OLD_PASSWORD in a config
-    "found_rotation_script":      0.03,   # reading the cron / rotation script
+    "new_service_status_checked": 0.02,
+    "found_error_log":            0.03,
+    "found_postgres_rotation":    0.10,
+    "found_new_password":         0.05,
+    "found_old_password_in_cfg":  0.03,
+    "found_rotation_script":      0.03,
     # Fix signals
-    "config_updated_correctly":   0.15,   # per config file correctly patched
-    "service_restarted_ok":       0.10,   # per service that comes up healthy
-    "all_services_healthy":       0.20,   # bonus when entire cluster is green
+    "config_updated_correctly":   0.15,
+    "service_restarted_ok":       0.10,
+    "all_services_healthy":       0.20,
+    # Efficiency bonus (faster = better)
+    "efficiency_bonus":           0.05,
     # Penalties
-    "step_cost":                 -0.01,   # small per-step cost
+    "step_cost":                 -0.01,
     "invalid_command":           -0.02,
     "destructive_command":       -0.10,
+    "repeated_command":          -0.01,
 }
 
 DESTRUCTIVE_PATTERNS = [
@@ -384,7 +403,6 @@ DESTRUCTIVE_PATTERNS = [
     r"\bmkfs\b",
     r"\bshred\b",
     r">\s*/dev/sd",
-    r"\btruncate\b",
     r"DROP\s+TABLE",
     r"DROP\s+DATABASE",
 ]
@@ -400,6 +418,7 @@ class DevOpsEnv:
         if task_id not in TASKS:
             raise ValueError(f"Unknown task_id '{task_id}'. Choose from: {list(TASKS)}")
         self.task_id = task_id
+        self._scenario = TASKS[task_id].get("scenario", "password_rotation")
         self._reset_state()
 
     # ── Public OpenEnv API ──
@@ -560,9 +579,15 @@ class DevOpsEnv:
             "top":        self._cmd_top,
             "htop":       self._cmd_top,
             "which":      self._cmd_which,
+            "cp":         self._cmd_cp,
+            "mv":         self._cmd_cp,
+            "du":         self._cmd_du,
+            "truncate":   self._cmd_truncate,
             "pwd":        lambda _: ("/root\n", "", 0),
             "id":         lambda _: ("uid=0(root) gid=0(root) groups=0(root)\n", "", 0),
             "history":    lambda _: ("", "history: not available in this session\n", 1),
+            "openssl":    self._cmd_openssl,
+            "certbot":    lambda _: ("Simulated: use cp to deploy certs manually.\n", "", 0),
         }
 
         handler = dispatch.get(base)
@@ -650,6 +675,26 @@ class DevOpsEnv:
 
     def _systemctl_restart(self, svc_name: str) -> Tuple[str, str, int]:
         svc = self._services[svc_name]
+
+        # Disk-full scenario: all services need disk space freed first
+        if getattr(self, '_disk_full_mode', False) and not getattr(self, '_disk_freed', False):
+            if svc_name not in ("postgres",):
+                return (
+                    "",
+                    f"Job for {svc_name}.service failed. "
+                    "ERROR: No space left on device. Free disk space first.\n",
+                    1,
+                )
+
+        # SSL scenario: api-gateway needs cert deployed first
+        if getattr(self, '_ssl_mode', False) and svc_name == "api-gateway":
+            if not getattr(self, '_deployed_new_cert', False):
+                return (
+                    "",
+                    "Job for api-gateway.service failed. "
+                    "ERROR: SSL certificate expired. Deploy new cert first.\n",
+                    1,
+                )
 
         if svc_name == "postgres":
             svc.status = ServiceStatus.RUNNING
@@ -1156,6 +1201,113 @@ class DevOpsEnv:
             return known[tool] + "\n", "", 0
         return "", f"which: no {tool} in PATH\n", 1
 
+    # ── cp / mv ──
+
+    def _cmd_cp(self, cmd: str) -> Tuple[str, str, int]:
+        parts = cmd.split()
+        # Filter flags
+        args = [p for p in parts[1:] if not p.startswith("-")]
+        if len(args) < 2:
+            return "", "cp: missing destination\n", 1
+        src, dst = args[0], args[1]
+        if src not in self._fs:
+            return "", f"cp: {src}: No such file or directory\n", 1
+        self._fs[dst] = self._fs[src]
+        self._track_file_read(src)
+        # Task5: deploying new cert
+        if "staging" in src and "certs" in dst and ".crt" in src:
+            self._deployed_new_cert = True
+            # Update api-gateway config to reference working cert
+            gw_cfg = "/etc/services/api-gateway/config.yml"
+            if gw_cfg in self._fs:
+                self._configs_fixed.add(gw_cfg)
+        return "", "", 0
+
+    # ── du ──
+
+    def _cmd_du(self, cmd: str) -> Tuple[str, str, int]:
+        parts = cmd.split()
+        path = "/var/log"
+        for p in parts[1:]:
+            if not p.startswith("-"):
+                path = p
+                break
+        lines = []
+        total = 0
+        for fp, content in self._fs.items():
+            if fp.startswith(path):
+                size_kb = max(1, len(content) // 1024)
+                total += size_kb
+                lines.append(f"{size_kb}K\t{fp}")
+                if size_kb > 100:
+                    self._found_large_logs = True
+        lines.append(f"{total}K\t{path} (total)")
+        return "\n".join(sorted(lines, key=lambda x: -int(x.split("K")[0]))) + "\n", "", 0
+
+    # ── truncate ──
+
+    def _cmd_truncate(self, cmd: str) -> Tuple[str, str, int]:
+        # truncate -s 0 /path/to/file
+        parts = cmd.split()
+        path = parts[-1] if len(parts) > 1 else ""
+        if not path or path.startswith("-"):
+            return "", "truncate: missing file operand\n", 1
+        if path not in self._fs:
+            return "", f"truncate: {path}: No such file or directory\n", 1
+        self._fs[path] = ""
+        self._freed_disk_space = True
+        self._found_large_logs = True
+        # If we freed space in disk_full mode, allow services to restart
+        if getattr(self, '_disk_full_mode', False):
+            self._disk_freed = True
+        return "", "", 0
+
+    # ── openssl ──
+
+    def _cmd_openssl(self, cmd: str) -> Tuple[str, str, int]:
+        if "verify" in cmd or "x509" in cmd:
+            if "/etc/ssl/certs/api-gateway.crt" in cmd:
+                self._found_expired_cert = True
+                return (
+                    "Certificate:\n"
+                    "  Subject: CN=api-gateway.company.com\n"
+                    "  Not Before: Mar 27 00:00:00 2025 GMT\n"
+                    "  Not After : Mar 26 23:59:59 2026 GMT  ← EXPIRED\n"
+                    "verification failed: certificate has expired\n",
+                    "", 1
+                )
+            if "/etc/ssl/staging/api-gateway.crt" in cmd:
+                self._found_new_cert = True
+                return (
+                    "Certificate:\n"
+                    "  Subject: CN=api-gateway.company.com\n"
+                    "  Not Before: Mar 27 00:00:00 2026 GMT\n"
+                    "  Not After : Mar 27 23:59:59 2027 GMT  ← VALID\n"
+                    "verify OK\n",
+                    "", 0
+                )
+        return "OpenSSL 3.0.2 (simulated)\n", "", 0
+
+    # ── df override for disk_full mode ──
+
+    def _cmd_df(self, cmd: str) -> Tuple[str, str, int]:
+        if getattr(self, '_disk_full_mode', False) and not getattr(self, '_disk_freed', False):
+            self._discovered_root_cause = True
+            return (
+                "Filesystem      Size  Used Avail Use% Mounted on\n"
+                "/dev/sda1        50G   18G   30G  38% /\n"
+                "/dev/sda2        20G   20G     0 100% /var/log  ← DISK FULL!\n"
+                "tmpfs           3.9G  1.2M  3.9G   1% /dev/shm\n",
+                "", 0,
+            )
+        return (
+            "Filesystem      Size  Used Avail Use% Mounted on\n"
+            "/dev/sda1        50G   18G   30G  38% /\n"
+            "/dev/sda2        20G   12G    8G  60% /var/log\n"
+            "tmpfs           3.9G  1.2M  3.9G   1% /dev/shm\n",
+            "", 0,
+        )
+
     # ── pipe (limited) ──
 
     def _cmd_pipe(self, cmd: str) -> Tuple[str, str, int]:
@@ -1249,17 +1401,27 @@ class DevOpsEnv:
     def _track_file_read(self, path: str) -> None:
         self._read_logs.add(path)
         lp = path.lower()
+        # Password rotation RCA
         if "postgres" in lp and "log" in lp:
             self._discovered_root_cause = True
-        if "db_credentials" in lp or "secrets" in lp:
+        if "db_credentials" in lp or ("secrets" in lp and "db" in lp):
             self._found_new_password = True
-        if path.endswith("rotate_db_passwords.sh") or "/crontab" in path:
+        if path.endswith("rotate_db_passwords.sh") or "/crontab" in lp or "deploy_cert" in lp:
             self._found_rotation_script = True
-        # Check if old password is in config files currently stored
         content = self._fs.get(path, "")
         if OLD_PASSWORD in content and "config.yml" in path:
             svc = path.split("/")[3] if len(path.split("/")) > 3 else path
             self._found_old_in_config.add(svc)
+        # Disk full RCA
+        if "error.log" in lp and "space left" in content.lower():
+            self._discovered_root_cause = True
+        if "du" in lp or ("access.log" in lp and len(content) > 5000):
+            self._found_large_logs = True
+        # SSL RCA
+        if "certs/api-gateway.crt" in path and "EXPIRED" in content:
+            self._found_expired_cert = True
+        if "staging/api-gateway.crt" in path and "VALID" in content:
+            self._found_new_cert = True
 
     def _track_config_update(self, path: str, new_content: str) -> None:
         if "config.yml" in path and OLD_PASSWORD not in new_content and NEW_PASSWORD in new_content:
@@ -1357,13 +1519,34 @@ class DevOpsEnv:
         return round(r, 4), {"components": components}
 
     def _reset_state(self) -> None:
+        from incidents import (
+            DISK_FULL_FS, _disk_full_services,
+            SSL_EXPIRED_FS, _ssl_expired_services,
+        )
         self._episode_id = str(uuid.uuid4())
         self._step_count = 0
         self._done = False
         self._cumulative_reward = 0.0
-        self._services: Dict[str, ServiceHealth] = _initial_services()
-        self._fs: Dict[str, str] = copy.deepcopy(INITIAL_FS)
         self._start_time = time.time()
+        self._command_history: List[str] = []
+
+        # Load scenario-specific state
+        scenario = getattr(self, '_scenario', 'password_rotation')
+        if scenario == 'disk_full':
+            self._services = _disk_full_services()
+            self._fs = copy.deepcopy(DISK_FULL_FS)
+            self._disk_full_mode = True
+        elif scenario == 'ssl_expired':
+            self._services = _ssl_expired_services()
+            self._fs = copy.deepcopy(SSL_EXPIRED_FS)
+            self._ssl_mode = True
+        else:
+            self._services = _initial_services()
+            self._fs = copy.deepcopy(INITIAL_FS)
+            self._disk_full_mode = False
+            self._ssl_mode = False
+
+        # Tracking
         self._checked_services: set = set()
         self._read_logs: set = set()
         self._discovered_root_cause = False
@@ -1373,3 +1556,13 @@ class DevOpsEnv:
         self._configs_fixed: set = set()
         self._services_restarted: set = set()
         self._reward_memo: set = set()
+
+        # Task4 tracking
+        self._found_large_logs = False
+        self._freed_disk_space = False
+        self._disk_freed = False
+
+        # Task5 tracking
+        self._found_expired_cert = False
+        self._found_new_cert = False
+        self._deployed_new_cert = False
