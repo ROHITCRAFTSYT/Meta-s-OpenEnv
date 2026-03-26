@@ -2,7 +2,7 @@
 title: DevOps Incident Responder
 emoji: 🔧
 colorFrom: red
-colorTo: orange
+colorTo: yellow
 sdk: docker
 pinned: true
 license: mit
@@ -11,9 +11,8 @@ tags:
   - devops
   - incident-response
   - sre
-  - microservices
   - reinforcement-learning
-short_description: OpenEnv environment - AI agent debugs a broken microservice cluster
+short_description: OpenEnv - AI agent debugs broken microservices
 ---
 
 # DevOps Incident Responder — OpenEnv Environment
