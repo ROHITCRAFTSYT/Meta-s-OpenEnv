@@ -1,0 +1,119 @@
+name: devops-incident-responder
+version: "1.0.0"
+description: >
+  An OpenEnv environment where an AI agent acts as a DevOps site-reliability
+  engineer responding to a production incident. An automated cron job rotated
+  the database password but forgot to restart the dependent microservices,
+  causing cascading authentication failures across the cluster. The agent must
+  use simulated bash commands to diagnose and fully remediate the incident.
+
+author: devops-incident-responder-team
+license: MIT
+tags:
+  - openenv
+  - devops
+  - incident-response
+  - sre
+  - microservices
+  - real-world
+
+# ── OpenEnv spec compliance ──────────────────────────────────────────
+framework: openenv-core
+spec_version: "0.2"
+
+# ── Task catalogue ───────────────────────────────────────────────────
+tasks:
+  - id: task1_discovery
+    name: "Service Health Discovery"
+    difficulty: easy
+    max_steps: 15
+    description: >
+      Identify the operational status of all 5 services in the cluster.
+      Determine which are CRASHED, DEGRADED, or RUNNING.
+
+  - id: task2_rca
+    name: "Root Cause Analysis"
+    difficulty: medium
+    max_steps: 25
+    description: >
+      Trace the incident to its root cause: an automated DB password rotation
+      that invalidated credentials still hardcoded in service configs.
+      Locate the stale configs and the new credentials file.
+
+  - id: task3_remediation
+    name: "Full Incident Remediation"
+    difficulty: hard
+    max_steps: 40
+    description: >
+      Fix the entire cluster: update both broken config files with the new
+      database password, then restart all affected services in the correct
+      dependency order until every service reports RUNNING.
+
+# ── API endpoints ────────────────────────────────────────────────────
+endpoints:
+  reset:    POST /reset
+  step:     POST /step
+  state:    GET  /state
+  tasks:    GET  /tasks
+  grader:   POST /grader
+  baseline: POST /baseline
+  health:   GET  /health
+
+# ── Action / Observation space summary ──────────────────────────────
+action_space:
+  type: object
+  fields:
+    command:
+      type: string
+      description: >
+        A bash command. Supported: systemctl, cat, head, tail, grep, ls,
+        find, curl, ping, ps, journalctl, sed, echo (with redirection),
+        printenv, env, netstat, df, free, date, uptime, hostname, uname, top.
+
+observation_space:
+  type: object
+  fields:
+    stdout:         { type: string }
+    stderr:         { type: string }
+    exit_code:      { type: integer }
+    step_count:     { type: integer }
+    timestamp:      { type: number }
+    system_metrics:
+      type: object
+      fields:
+        services:
+          type: object
+          description: "Per-service health: status, cpu, memory, pid, error"
+        total_errors_last_minute: { type: integer }
+        active_connections:       { type: integer }
+
+# ── Reward signal ────────────────────────────────────────────────────
+reward:
+  range: [-1.0, 1.0]
+  description: >
+    Shaped reward with partial progress signals.
+    Positive: discovering service status (+0.02/service), reading error logs
+    (+0.03), finding root cause in postgres log (+0.10), locating new
+    credentials (+0.05), fixing a config (+0.15), successful service restart
+    (+0.10), all services healthy bonus (+0.20).
+    Negative: step cost (-0.01), invalid command (-0.02),
+    destructive command (-0.10).
+
+# ── Runtime ──────────────────────────────────────────────────────────
+runtime:
+  port: 7860
+  workers: 1
+  max_concurrent_envs: 50
+  python: "3.10"
+
+# ── Docker / HF Space ────────────────────────────────────────────────
+docker:
+  base_image: python:3.11-slim
+  port: 7860
+
+huggingface:
+  space_sdk: docker
+  tags:
+    - openenv
+    - devops
+    - incident-response
