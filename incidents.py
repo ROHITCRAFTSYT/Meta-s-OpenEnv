@@ -27,12 +27,12 @@ DISK_FULL_FS = {
 
     # Giant log files filling up disk
     "/var/log/api-gateway/access.log": (
-        "[2026-03-27 06:00:00] GET /api/products 200\n" * 50000 +
+        "[2026-03-27 06:00:00] GET /api/products 200\n" * 200 +
         "[2026-03-27 08:00:01] ERROR: Cannot write to log file: No space left on device\n"
         "[2026-03-27 08:00:01] FATAL: Disk full. Service shutting down.\n"
     ),
     "/var/log/api-gateway/error.log": (
-        "ERROR repeated 200000 times\n" * 10000 +
+        "ERROR repeated 200000 times\n" * 50 +
         "[2026-03-27 08:00:01] FATAL: No space left on device\n"
     ),
     "/var/log/auth-service/error.log": (

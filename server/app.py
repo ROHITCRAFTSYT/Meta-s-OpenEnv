@@ -73,8 +73,11 @@ def _get_session(session_id: str, task_id: str) -> DevOpsEnv:
 async def lifespan(app: FastAPI):
     # Pre-warm one env per task
     for tid in TASKS:
-        sid = f"default_{tid}"
-        _sessions[sid] = DevOpsEnv(task_id=tid)
+        try:
+            sid = f"default_{tid}"
+            _sessions[sid] = DevOpsEnv(task_id=tid)
+        except Exception as e:
+            print(f"[startup] Failed to pre-warm {tid}: {e}", flush=True)
     yield
     _sessions.clear()
     _episode_logs.clear()
@@ -137,7 +140,6 @@ async def health():
 
 
 @app.get("/info", response_model=Dict[str, Any])
-@app.get("/", response_model=Dict[str, Any], include_in_schema=False)
 async def root_json():
     """JSON info — returned when Accept: application/json"""
     return {
