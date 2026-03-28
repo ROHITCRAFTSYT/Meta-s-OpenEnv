@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -151,7 +151,9 @@ async def root_json():
 
 
 @app.post("/reset", response_model=Dict[str, Any])
-async def reset(body: ResetRequest):
+async def reset(body: Optional[ResetRequest] = Body(None)):
+    if body is None:
+        body = ResetRequest()
     global _total_episodes
     sid, env = _get_or_create_session(body.task_id, body.session_id)
     result = env.reset()
